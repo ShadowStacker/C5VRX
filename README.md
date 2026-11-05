@@ -214,8 +214,26 @@ KiCad ERC/DRC and schematic/PCB parity checks are clean; REV C has not been buil
 
 ## Controls
 
-**BOOT button:** short press = next channel (menu: next item); hold 0.6 s =
+**BOOT button:** short press = **fast scan** (menu: next item); hold 0.6 s =
 open the menu (menu: select).
+
+> **Fork modification — fast scan.** In this fork a short BOOT press no
+> longer steps to the next channel. It starts a fast scan that steps through
+> all 48 channels in table order (R, A, B, E, F, L), starting after the
+> current one, and stops on the first channel with centred analog video.
+> Press BOOT again to scan on from the next channel; a press while it is
+> still scanning cancels and returns to the starting channel. With no VTX on
+> it keeps looping until you press. Console key `k` does the same. Each full
+> lap logs `FASTSCAN sweep=… ms=… per_channel_us=…` on the serial console.
+> Channels can still be chosen one by one from the menu (CHANNEL / BAND) and
+> the slower "strongest wins" SCAN is still in the menu and on `s`.
+>
+> This fast-scan change is a modification of
+> [C5VRX](https://github.com/Twotoz/C5VRX) by Twotoz and the C5VRX
+> contributors; it is not an official C5VRX release. Visit the
+> [official C5VRX website](https://twotoz.github.io/C5VRX/) for the original
+> project and its Discord invite. See the source and license notices
+> (GPL-3.0-only) for the applicable terms.
 
 **Menu**, one list with every value in view: BAND, CHANNEL, SCAN, VIDEO
 (AUTO/NTSC/PAL), FILTER (AUTO/XNARROW/NARROW/NORMAL/WIDE), PHY FILT
@@ -232,7 +250,7 @@ case-sensitive, without Enter; `h` lists what your firmware supports.
 | Key | Action |
 | --- | --- |
 | `T` / `h` | Status / help |
-| `b` / `c` / `s` | Next band / next channel / scan |
+| `b` / `c` / `s` / `k` | Next band / next channel / scan / fast scan (fork) |
 | `o` / `n` / `x` / `e` | Open menu / next item / select / exit |
 | `v` / `g` / `G` | Video standard / output level / gain |
 | `F` / `B` / `C` | Calibrate current filter / full RF optimization / read-only calibration report |

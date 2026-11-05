@@ -261,6 +261,107 @@ static void scan(void)
 }
 
 /* ---- Menu actions ---------------------------------------------------------- */
+/* ---- Fast scan (BOOT short press) -----------------------------------------
+ * Steps through every channel in table order, starting at the one after the
+ * current, as fast as the radio allows, and stops on the first channel that
+ * carries centred analog video. It loops over the table until it finds one,
+ * so with no VTX on it keeps scanning; a BOOT press during the scan cancels
+ * it and returns to the channel it started on. Pressing BOOT on a found
+ * channel scans on from the next one.
+ *
+ * The full scan() above waits 90 ms per channel and takes a median of three
+ * detections; this one settles a few ms, takes the better of two quick
+ * detections, and only spends the slow, careful channel_confidence() check
+ * on a candidate, so a false hit never stops it. Every detection window is
+ * ~205 us of samples (4092 endpoints, >3 video lines) from the live DMA
+ * ring, so the time per channel is set by the retune plus the settle
+ * delays below. Each sweep logs its time ("FASTSCAN sweep ...").
+ *
+ * Modification of C5VRX (https://github.com/Twotoz/C5VRX): fast scan mode. */
+#define FAST_SCAN_SETTLE_MS      5u   /* after a retune, before sampling */
+#define FAST_SCAN_GAIN_SETTLE_MS 3u   /* after the max-gain retry write */
+#define FAST_SCAN_GAP_MS         1u   /* between the two quick detections */
+
+static bool boot_pressed(void) { return gpio_get_level(BOOT_BUTTON) == 0; }
+
+static analog_video_t fast_confidence(void)
+{
+    analog_video_t best = {0};
+    for (unsigned w = 0; w < 2u; ++w) {
+        if (w) vTaskDelay(pdMS_TO_TICKS(FAST_SCAN_GAP_MS));
+        if (!copy_recent_endpoints(s_scan_buf, SCAN_PAIRS)) continue;
+        analog_video_t v = analog_video_detect(s_scan_buf, SCAN_PAIRS, c5vrx_phase8_gain_lut);
+        if (v.confidence > best.confidence) best = v;
+        if (best.confidence >= ANALOG_VIDEO_MIN_CONFIDENCE) break;   /* no need for the second */
+    }
+    return best;
+}
+
+static bool fast_candidate(analog_video_t v)
+{
+    return v.confidence >= ANALOG_VIDEO_MIN_CONFIDENCE && abs(v.offset_khz) <= 3000;
+}
+
+static void fast_scan(void)
+{
+    if (!receiver_pause("FASTSCAN")) return;
+    const size_t original = rf_channel_index();
+    const uint8_t max_gain = rf_gain_table()->max_index, scan_gain = 52u;
+    bool found = false, cancelled = false;
+    unsigned sweeps = 0;
+    s_scan_active = true;
+    s_scan_progress = 0;
+    receiver_set_gain(scan_gain);
+    printf("FASTSCAN start from=%s (BOOT cancels)\n", rf_channel()->name);
+    size_t ch = original;
+    int64_t sweep_t0 = esp_timer_get_time();
+    unsigned sweep_channels = 0;
+    while (!found && !cancelled) {
+        ch = (ch + 1u) % FPV_CHANNELS;
+        if (ch == original) {   /* one full lap without video */
+            const int64_t us = esp_timer_get_time() - sweep_t0;
+            printf("FASTSCAN sweep=%u ms=%lld channels=%u per_channel_us=%lld (no video)\n", ++sweeps,
+                   (long long)(us / 1000), sweep_channels, sweep_channels ? (long long)(us / sweep_channels) : 0LL);
+            sweep_t0 = esp_timer_get_time();
+            sweep_channels = 0;
+        }
+        if (boot_pressed()) { cancelled = true; break; }
+        s_scan_progress = (unsigned)(ch * 100u / FPV_CHANNELS);
+        if (rf_set_channel(ch) != ESP_OK) continue;   /* outside the C5 range */
+        ++sweep_channels;
+        vTaskDelay(pdMS_TO_TICKS(FAST_SCAN_SETTLE_MS));
+        analog_video_t v = fast_confidence();
+        if (!fast_candidate(v)) {
+            /* A far VTX is starved at the scan gain: one more look at maximum,
+             * only when the window shows energy (as scan() does). */
+            metrics_t m = {0};
+            if (copy_control_window(s_window, CONTROL_BYTES)) m = measure_window(s_window, CONTROL_BYTES);
+            if (m.origin_pm > 500) {
+                receiver_set_gain(max_gain);
+                vTaskDelay(pdMS_TO_TICKS(FAST_SCAN_GAIN_SETTLE_MS));
+                analog_video_t far = fast_confidence();
+                receiver_set_gain(scan_gain);
+                if (far.confidence > v.confidence) v = far;
+            }
+        }
+        if (!fast_candidate(v)) continue;
+        /* Candidate: the careful check (median of three, max-gain retry). */
+        printf("FASTSCAN candidate %s %u MHz video=%d offset_khz=%d\n", rf_channel()->name,
+               rf_channel()->freq_mhz, v.confidence, v.offset_khz);
+        if (fast_candidate(channel_confidence(scan_gain, max_gain, NULL))) found = true;
+    }
+    if (cancelled) {
+        (void)rf_set_channel(original);
+        while (boot_pressed()) vTaskDelay(pdMS_TO_TICKS(TICK_MS));   /* the release is not a new press */
+    }
+    s_scan_active = false;
+    receiver_set_gain(max_gain);
+    receiver_resume();
+    printf("FASTSCAN result=%s channel=%s %u MHz\n", found ? "found" : "cancelled",
+           rf_channel()->name, rf_channel()->freq_mhz);
+    after_retune();
+}
+
 static void cycle_video_standard(void)
 {
     menu_set_standard_mode(s_std_mode == STD_MODE_AUTO ? STD_MODE_NTSC :
@@ -408,6 +509,7 @@ static void command(int c, unsigned *menu_idle)
     case 'c': rf_next_channel(); after_retune(); break;
     case 'b': rf_next_band(); after_retune(); break;
     case 's': scan(); break;
+    case 'k': fast_scan(); break;   /* same as a BOOT short press */
     case 'A': {
         profile_set_live_mode(!profile_live_mode());
         printf("PROFILE live switch %s (saved): %s\n", profile_live_mode() ? "ON" : "OFF",
@@ -472,7 +574,7 @@ static void control_task(void *arg)
         experimental_poll();
         for (unsigned k = 0; k < 8 && xQueueReceive(s_commands, &c, 0) == pdTRUE; ++k) command(c, &menu_idle);
 
-        /* BOOT button: short = next channel (menu: next item); 0.6 s = menu
+        /* BOOT button: short = fast scan (menu: next item); 0.6 s = menu
          * (menu: do the selected item). */
         /* A calibration status screen or the boot logo owns the picture: no
          * menu, no idle exit. */
@@ -491,7 +593,7 @@ static void control_task(void *arg)
         } else if (btn) {
             if (!long_fired && btn >= 2) {
                 if (s_menu_active) menu_next();
-                else { rf_next_channel(); after_retune(); }
+                else fast_scan();   /* was: next channel */
             }
             btn = 0;
             long_fired = false;

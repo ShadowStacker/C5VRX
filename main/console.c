@@ -101,7 +101,7 @@ static void help(void)
            "  G RX gain LEVEL -> KEEL (KEEL-1) -> RSSI -> MAX -> fixed G78..G24 (models kept across reboots; MAX/fixed: next boot LEVEL),\n"
            "  A live VTX profile switch on/off (continuous matching every 30 s; off = report only),\n"
            "  m decoder U80P64-R1 <-> U85Q (verified restart, saved; video stops briefly),\n"
-           "  I IQ snapshot, o menu open/close, n/x menu next/select, c next channel, b next band, s scan,\n"
+           "  I IQ snapshot, o menu open/close, n/x menu next/select, c next channel, b next band, s scan, k fast scan,\n"
            "  v video standard AUTO/NTSC/PAL, f analog filter AUTO/NARROW/NORMAL/WIDE (this boot; calibrated classes),\n"
            "  e close menu (web menu direct controls),\n"
            "  F calibrate current filter; B full RF optimization (ground only; video stops), L bench IQ lane comparison (video stops ~3 s),\n"
