@@ -297,6 +297,21 @@ static analog_video_t fast_confidence(void)
     return best;
 }
 
+/* While the receiver is paused the live output carries no stable picture,
+ * so the goggles show the menu raster's status screen instead (its header
+ * shows the channel being checked). Redrawn at most every 100 ms. */
+static void fast_scan_screen(unsigned lap, bool force)
+{
+    static int64_t last_us;
+    const int64_t now = esp_timer_get_time();
+    if (!force && now - last_us < 100000) return;
+    last_us = now;
+    char line2[32];
+    if (lap) snprintf(line2, sizeof(line2), "NO VIDEO YET, LAP %u", lap + 1u);
+    else line2[0] = 0;
+    status_screen("SCANNING", "PRESS BOOT TO CANCEL", line2, -1);
+}
+
 static bool fast_candidate(analog_video_t v)
 {
     return v.confidence >= ANALOG_VIDEO_MIN_CONFIDENCE && abs(v.offset_khz) <= 3000;
@@ -313,6 +328,7 @@ static void fast_scan(void)
     s_scan_progress = 0;
     receiver_set_gain(scan_gain);
     printf("FASTSCAN start from=%s (BOOT cancels)\n", rf_channel()->name);
+    fast_scan_screen(0, true);
     size_t ch = original;
     int64_t sweep_t0 = esp_timer_get_time();
     unsigned sweep_channels = 0;
@@ -329,6 +345,7 @@ static void fast_scan(void)
         s_scan_progress = (unsigned)(ch * 100u / FPV_CHANNELS);
         if (rf_set_channel(ch) != ESP_OK) continue;   /* outside the C5 range */
         ++sweep_channels;
+        fast_scan_screen(sweeps, false);
         vTaskDelay(pdMS_TO_TICKS(FAST_SCAN_SETTLE_MS));
         analog_video_t v = fast_confidence();
         if (!fast_candidate(v)) {
@@ -348,12 +365,14 @@ static void fast_scan(void)
         /* Candidate: the careful check (median of three, max-gain retry). */
         printf("FASTSCAN candidate %s %u MHz video=%d offset_khz=%d\n", rf_channel()->name,
                rf_channel()->freq_mhz, v.confidence, v.offset_khz);
+        fast_scan_screen(sweeps, true);   /* header: the candidate channel */
         if (fast_candidate(channel_confidence(scan_gain, max_gain, NULL))) found = true;
     }
     if (cancelled) {
         (void)rf_set_channel(original);
         while (boot_pressed()) vTaskDelay(pdMS_TO_TICKS(TICK_MS));   /* the release is not a new press */
     }
+    status_screen_end();   /* back to the live picture */
     s_scan_active = false;
     receiver_set_gain(max_gain);
     receiver_resume();

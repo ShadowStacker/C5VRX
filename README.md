@@ -223,7 +223,8 @@ open the menu (menu: select).
 > current one, and stops on the first channel with centred analog video.
 > Press BOOT again to scan on from the next channel; a press while it is
 > still scanning cancels and returns to the starting channel. With no VTX on
-> it keeps looping until you press. Console key `k` does the same. Each full
+> it keeps looping until you press. While it scans, the goggles show a
+> SCANNING screen with the channel being checked. Console key `k` does the same. Each full
 > lap logs `FASTSCAN sweep=… ms=… per_channel_us=…` on the serial console.
 > Channels can still be chosen one by one from the menu (CHANNEL / BAND) and
 > the slower "strongest wins" SCAN is still in the menu and on `s`.
