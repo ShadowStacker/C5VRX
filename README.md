@@ -227,6 +227,10 @@ open the menu (menu: select).
 > SCANNING screen with the channel being checked. Video on a channel is
 > checked against the channels up to 45 MHz either side (a VTX also shows
 > next door through the filter): the one with the most received power wins.
+> If the channel you scan away from has video, hits that turn out to be
+> that same VTX seen from next door are skipped until the scan comes back
+> around, so every other channel gets its turn; with no other VTX on, it
+> locks back on to the channel you started from.
 > A FOUND screen then names the channel for 2 s before the live picture
 > returns (the live picture itself cannot carry text). Console key `k` does
 > the same. Each full

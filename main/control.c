@@ -308,7 +308,7 @@ static void fast_scan_screen(unsigned lap, bool force)
     if (!force && now - last_us < 100000) return;
     last_us = now;
     char line2[32];
-    if (lap) snprintf(line2, sizeof(line2), "NO NEW VIDEO YET, LAP %u", lap + 1u);
+    if (lap) snprintf(line2, sizeof(line2), "NO VIDEO YET, LAP %u", lap + 1u);
     else line2[0] = 0;
     status_screen("SCANNING", "PRESS BOOT TO CANCEL", line2, -1);
 }
@@ -396,6 +396,19 @@ static size_t fast_pick_neighbour(size_t cand, uint8_t scan_gain)
     return best;
 }
 
+/* True when every channel still ahead in this lap (after `ch`, before the
+ * start channel) lies within the neighbour window of the start channel:
+ * the scan has come back around, and anything left would only show the
+ * start channel's VTX again. */
+static bool fast_back_around(size_t ch, size_t original)
+{
+    if (ch == original) return true;   /* a full lap */
+    const int f0 = rf_channel_freq(original);
+    for (size_t i = (ch + 1u) % FPV_CHANNELS; i != original; i = (i + 1u) % FPV_CHANNELS)
+        if (abs((int)rf_channel_freq(i) - f0) > (int)FAST_SCAN_NEIGHBOUR_MHZ) return false;
+    return true;
+}
+
 static void fast_scan(void)
 {
     if (!receiver_pause("FASTSCAN")) return;
@@ -455,8 +468,13 @@ static void fast_scan(void)
         /* Video here; is it really this channel or the one next to it? */
         const char *cand_name = rf_channel()->name;   /* static table entry */
         const size_t pick = fast_pick_neighbour(ch, scan_gain);
-        if (pick == original && left_video) {
-            /* The VTX the scan started on, seen from next door: scan on. */
+        /* The VTX the scan started on, seen from next door. On the way out
+         * it is skipped so every other channel gets its turn; once the lap
+         * has come back around (only the start channel's neighbours, or the
+         * start channel itself, left), the scan locks back on to it. */
+        if (pick == original && left_video && fast_back_around(ch, original)) {
+            printf("FASTSCAN back around at %s: no other VTX, locking back on to the start channel\n", cand_name);
+        } else if (pick == original && left_video) {
             same_vtx |= 1ull << ch;
             printf("FASTSCAN %s is the start channel's VTX, scanning on\n", cand_name);
             continue;
