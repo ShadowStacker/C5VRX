@@ -281,6 +281,7 @@ static void scan(void)
 #define FAST_SCAN_SETTLE_MS      5u   /* after a retune, before sampling */
 #define FAST_SCAN_GAIN_SETTLE_MS 3u   /* after the max-gain retry write */
 #define FAST_SCAN_GAP_MS         1u   /* between the two quick detections */
+#define FAST_SCAN_FOUND_MS    2000u   /* FOUND <channel> screen before live video */
 
 static bool boot_pressed(void) { return gpio_get_level(BOOT_BUTTON) == 0; }
 
@@ -307,7 +308,7 @@ static void fast_scan_screen(unsigned lap, bool force)
     if (!force && now - last_us < 100000) return;
     last_us = now;
     char line2[32];
-    if (lap) snprintf(line2, sizeof(line2), "NO VIDEO YET, LAP %u", lap + 1u);
+    if (lap) snprintf(line2, sizeof(line2), "NO NEW VIDEO YET, LAP %u", lap + 1u);
     else line2[0] = 0;
     status_screen("SCANNING", "PRESS BOOT TO CANCEL", line2, -1);
 }
@@ -317,6 +318,84 @@ static bool fast_candidate(analog_video_t v)
     return v.confidence >= ANALOG_VIDEO_MIN_CONFIDENCE && abs(v.offset_khz) <= 3000;
 }
 
+/* ---- Neighbour check -------------------------------------------------------
+ * A VTX is also seen on the channels next to it: the BW40 filter passes a
+ * carrier ~20 MHz off, and the 50 ns offset estimate wraps every 20 MHz, so
+ * on a neighbour 19-20 MHz away (bands A, B, F, E) the aliased carrier
+ * still looks centred and the line periodicity is the same. Video alone
+ * cannot tell them apart; the filter can: the real channel puts the carrier
+ * in the middle of the passband, a neighbour puts it on the skirt. So on a
+ * candidate, every table channel within FAST_SCAN_NEIGHBOUR_MHZ is measured
+ * at one gain (lowered first until the candidate does not clip, so a strong
+ * VTX does not saturate every channel to the same level) and the one with
+ * the most received power that also shows centred video wins. */
+#define FAST_SCAN_NEIGHBOUR_MHZ  45u   /* covers the 19/20 and 37/40 MHz neighbours */
+#define FAST_SCAN_MEASURE_MS     15u   /* settle before a neighbour measurement */
+#define FAST_SCAN_POWER_WINDOWS  8u
+
+/* Mean envelope power x10 and mean clip per mille over a few windows. */
+static int fast_power(int *clip_pm)
+{
+    int sum = 0, clip = 0, n = 0;
+    for (unsigned w = 0; w < FAST_SCAN_POWER_WINDOWS; ++w) {
+        if (w) vTaskDelay(pdMS_TO_TICKS(1));
+        if (!copy_control_window(s_window, CONTROL_BYTES)) continue;
+        const metrics_t m = measure_window(s_window, CONTROL_BYTES);
+        sum += m.p_median;
+        clip += m.clip_pm;
+        ++n;
+    }
+    if (clip_pm) *clip_pm = n ? clip / n : 0;
+    return n ? sum * 10 / n : 0;
+}
+
+static size_t fast_pick_neighbour(size_t cand, uint8_t scan_gain)
+{
+    const int f0 = rf_channel_freq(cand);
+    size_t list[FPV_CHANNELS];
+    unsigned count = 0;
+    list[count++] = cand;
+    for (size_t i = 0; i < FPV_CHANNELS; ++i) {
+        const int f = rf_channel_freq(i);
+        if (i == cand || abs(f - f0) > (int)FAST_SCAN_NEIGHBOUR_MHZ) continue;
+        bool dup = false;   /* the same frequency in another band: measure once */
+        for (unsigned k = 0; k < count; ++k)
+            if (abs((int)rf_channel_freq(list[k]) - f) <= 2) dup = true;
+        if (!dup) list[count++] = i;
+    }
+    if (count == 1u || rf_set_channel(cand) != ESP_OK) return cand;
+
+    /* One comparison gain, below clipping on the candidate. */
+    uint8_t gain = scan_gain;
+    receiver_set_gain(gain);
+    vTaskDelay(pdMS_TO_TICKS(FAST_SCAN_MEASURE_MS));
+    int clip = 0;
+    (void)fast_power(&clip);
+    while (clip > 5 && gain > 14u) {
+        gain = (uint8_t)(gain - 6u);
+        receiver_set_gain(gain);
+        vTaskDelay(pdMS_TO_TICKS(FAST_SCAN_GAIN_SETTLE_MS + 2u));
+        (void)fast_power(&clip);
+    }
+
+    size_t best = cand;
+    int best_power = -1;
+    for (unsigned k = 0; k < count; ++k) {
+        if (rf_set_channel(list[k]) != ESP_OK) continue;
+        fast_scan_screen(0, false);
+        vTaskDelay(pdMS_TO_TICKS(FAST_SCAN_MEASURE_MS));
+        const int power = fast_power(NULL);
+        const analog_video_t v = scan_confidence();   /* median of three */
+        const bool video = fast_candidate(v);
+        printf("FASTSCAN neighbour %s %u MHz power=%d video=%d offset_khz=%d gain=%u%s\n",
+               rf_channel()->name, rf_channel()->freq_mhz, power, v.confidence, v.offset_khz, gain,
+               video ? "" : " (no centred video)");
+        if (video && power > best_power) { best = list[k]; best_power = power; }
+    }
+    receiver_set_gain(scan_gain);
+    return best;
+}
+
 static void fast_scan(void)
 {
     if (!receiver_pause("FASTSCAN")) return;
@@ -324,10 +403,15 @@ static void fast_scan(void)
     const uint8_t max_gain = rf_gain_table()->max_index, scan_gain = 52u;
     bool found = false, cancelled = false;
     unsigned sweeps = 0;
+    _Static_assert(FPV_CHANNELS <= 64u, "same_vtx is a 64-bit channel mask");
+    uint64_t same_vtx = 0;   /* channels whose video resolved to the start channel */
     s_scan_active = true;
     s_scan_progress = 0;
     receiver_set_gain(scan_gain);
-    printf("FASTSCAN start from=%s (BOOT cancels)\n", rf_channel()->name);
+    vTaskDelay(pdMS_TO_TICKS(FAST_SCAN_SETTLE_MS));
+    /* Leaving a channel with video: that VTX is not a result this time. */
+    const bool left_video = fast_candidate(fast_confidence());
+    printf("FASTSCAN start from=%s%s (BOOT cancels)\n", rf_channel()->name, left_video ? " (has video, skipping it)" : "");
     fast_scan_screen(0, true);
     size_t ch = original;
     int64_t sweep_t0 = esp_timer_get_time();
@@ -342,6 +426,7 @@ static void fast_scan(void)
             sweep_channels = 0;
         }
         if (boot_pressed()) { cancelled = true; break; }
+        if (same_vtx & (1ull << ch)) { ++sweep_channels; continue; }   /* already known: the VTX we left */
         s_scan_progress = (unsigned)(ch * 100u / FPV_CHANNELS);
         if (rf_set_channel(ch) != ESP_OK) continue;   /* outside the C5 range */
         ++sweep_channels;
@@ -366,11 +451,31 @@ static void fast_scan(void)
         printf("FASTSCAN candidate %s %u MHz video=%d offset_khz=%d\n", rf_channel()->name,
                rf_channel()->freq_mhz, v.confidence, v.offset_khz);
         fast_scan_screen(sweeps, true);   /* header: the candidate channel */
-        if (fast_candidate(channel_confidence(scan_gain, max_gain, NULL))) found = true;
+        if (!fast_candidate(channel_confidence(scan_gain, max_gain, NULL))) continue;
+        /* Video here; is it really this channel or the one next to it? */
+        const char *cand_name = rf_channel()->name;   /* static table entry */
+        const size_t pick = fast_pick_neighbour(ch, scan_gain);
+        if (pick == original && left_video) {
+            /* The VTX the scan started on, seen from next door: scan on. */
+            same_vtx |= 1ull << ch;
+            printf("FASTSCAN %s is the start channel's VTX, scanning on\n", cand_name);
+            continue;
+        }
+        if (rf_set_channel(pick) != ESP_OK) { (void)rf_set_channel(ch); continue; }
+        if (pick != ch) printf("FASTSCAN neighbour %s wins over %s\n", rf_channel()->name, cand_name);
+        found = true;
     }
     if (cancelled) {
         (void)rf_set_channel(original);
         while (boot_pressed()) vTaskDelay(pdMS_TO_TICKS(TICK_MS));   /* the release is not a new press */
+    }
+    if (found) {
+        /* The live picture cannot carry text (the hardware demodulator feeds
+         * the DAC directly), so name the channel before going live. */
+        char line1[32];
+        snprintf(line1, sizeof(line1), "%s  %u MHZ", rf_channel()->name, rf_channel()->freq_mhz);
+        status_screen("FOUND", line1, "PRESS BOOT TO SCAN ON", -1);
+        vTaskDelay(pdMS_TO_TICKS(FAST_SCAN_FOUND_MS));
     }
     status_screen_end();   /* back to the live picture */
     s_scan_active = false;

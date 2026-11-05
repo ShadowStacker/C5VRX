@@ -224,7 +224,12 @@ open the menu (menu: select).
 > Press BOOT again to scan on from the next channel; a press while it is
 > still scanning cancels and returns to the starting channel. With no VTX on
 > it keeps looping until you press. While it scans, the goggles show a
-> SCANNING screen with the channel being checked. Console key `k` does the same. Each full
+> SCANNING screen with the channel being checked. Video on a channel is
+> checked against the channels up to 45 MHz either side (a VTX also shows
+> next door through the filter): the one with the most received power wins.
+> A FOUND screen then names the channel for 2 s before the live picture
+> returns (the live picture itself cannot carry text). Console key `k` does
+> the same. Each full
 > lap logs `FASTSCAN sweep=… ms=… per_channel_us=…` on the serial console.
 > Channels can still be chosen one by one from the menu (CHANNEL / BAND) and
 > the slower "strongest wins" SCAN is still in the menu and on `s`.
