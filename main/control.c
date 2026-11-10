@@ -24,6 +24,12 @@
 #include "flightlog_format.h"
 
 #define BOOT_BUTTON      GPIO_NUM_28    /* XIAO ESP32-C5 BOOT */
+/* Fork addition: a separate fast-scan push button from D10/GPIO10 to GND
+ * (internal pull-up). D0-D2 carry internal IQ loopbacks and D3 is a boot
+ * strapping pin, so D10 is the free pad. Disabled while the experimental
+ * Clock Pin D10 drives that pad with the 40 MHz clock. */
+#define SCAN_BUTTON      GPIO_NUM_10    /* XIAO D10 */
+static bool s_scan_button_enabled;
 #define TICK_MS          50
 #define LONG_TICKS       12             /* 0.6 s */
 #define MENU_IDLE_TICKS  600            /* 30 s without a press closes the menu */
@@ -261,13 +267,13 @@ static void scan(void)
 }
 
 /* ---- Menu actions ---------------------------------------------------------- */
-/* ---- Fast scan (BOOT short press) -----------------------------------------
+/* ---- Fast scan (SCAN button on D10, console k) ------------------------------
  * Steps through every channel in table order, starting at the one after the
  * current, as fast as the radio allows, and stops on the first channel that
  * carries centred analog video. It loops over the table until it finds one,
- * so with no VTX on it keeps scanning; a BOOT press during the scan cancels
- * it and returns to the channel it started on. Pressing BOOT on a found
- * channel scans on from the next one.
+ * so with no VTX on it keeps scanning; a SCAN or BOOT press during the scan
+ * cancels it and returns to the channel it started on. Pressing SCAN on a
+ * found channel scans on from the next one.
  *
  * The full scan() above waits 90 ms per channel and takes a median of three
  * detections; this one settles a few ms, takes the better of two quick
@@ -283,7 +289,9 @@ static void scan(void)
 #define FAST_SCAN_GAP_MS         1u   /* between the two quick detections */
 #define FAST_SCAN_FOUND_MS    2000u   /* FOUND <channel> screen before live video */
 
-static bool boot_pressed(void) { return gpio_get_level(BOOT_BUTTON) == 0; }
+static bool scan_pressed(void) { return s_scan_button_enabled && gpio_get_level(SCAN_BUTTON) == 0; }
+/* Either button cancels a scan in progress. */
+static bool boot_pressed(void) { return gpio_get_level(BOOT_BUTTON) == 0 || scan_pressed(); }
 
 static analog_video_t fast_confidence(void)
 {
@@ -310,7 +318,7 @@ static void fast_scan_screen(unsigned lap, bool force)
     char line2[32];
     if (lap) snprintf(line2, sizeof(line2), "NO VIDEO YET, LAP %u", lap + 1u);
     else line2[0] = 0;
-    status_screen("SCANNING", "PRESS BOOT TO CANCEL", line2, -1);
+    status_screen("SCANNING", "PRESS SCAN TO CANCEL", line2, -1);
 }
 
 static bool fast_candidate(analog_video_t v)
@@ -424,7 +432,7 @@ static void fast_scan(void)
     vTaskDelay(pdMS_TO_TICKS(FAST_SCAN_SETTLE_MS));
     /* Leaving a channel with video: that VTX is not a result this time. */
     const bool left_video = fast_candidate(fast_confidence());
-    printf("FASTSCAN start from=%s%s (BOOT cancels)\n", rf_channel()->name, left_video ? " (has video, skipping it)" : "");
+    printf("FASTSCAN start from=%s%s (SCAN or BOOT cancels)\n", rf_channel()->name, left_video ? " (has video, skipping it)" : "");
     fast_scan_screen(0, true);
     size_t ch = original;
     int64_t sweep_t0 = esp_timer_get_time();
@@ -492,7 +500,7 @@ static void fast_scan(void)
          * the DAC directly), so name the channel before going live. */
         char line1[32];
         snprintf(line1, sizeof(line1), "%s  %u MHZ", rf_channel()->name, rf_channel()->freq_mhz);
-        status_screen("FOUND", line1, "PRESS BOOT TO SCAN ON", -1);
+        status_screen("FOUND", line1, "PRESS SCAN TO SCAN ON", -1);
         vTaskDelay(pdMS_TO_TICKS(FAST_SCAN_FOUND_MS));
     }
     status_screen_end();   /* back to the live picture */
@@ -651,7 +659,7 @@ static void command(int c, unsigned *menu_idle)
     case 'c': rf_next_channel(); after_retune(); break;
     case 'b': rf_next_band(); after_retune(); break;
     case 's': scan(); break;
-    case 'k': fast_scan(); break;   /* same as a BOOT short press */
+    case 'k': fast_scan(); break;   /* same as a SCAN button (D10) press */
     case 'A': {
         profile_set_live_mode(!profile_live_mode());
         printf("PROFILE live switch %s (saved): %s\n", profile_live_mode() ? "ON" : "OFF",
@@ -709,6 +717,7 @@ static void control_task(void *arg)
     uint8_t afc_lost = 0;
     unsigned settle = RETUNE_SETTLE_TICKS, btn = 0, boot_grace = 20, menu_idle = 0, menu_refresh = 0;
     bool long_fired = false, was_locked = false;
+    unsigned scan_btn = 0;
     uint32_t seen_phy = phy_generation(), seen_control = s_control_epoch;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(TICK_MS));
@@ -716,12 +725,12 @@ static void control_task(void *arg)
         experimental_poll();
         for (unsigned k = 0; k < 8 && xQueueReceive(s_commands, &c, 0) == pdTRUE; ++k) command(c, &menu_idle);
 
-        /* BOOT button: short = fast scan (menu: next item); 0.6 s = menu
+        /* BOOT button: short = next channel (menu: next item); 0.6 s = menu
          * (menu: do the selected item). */
         /* A calibration status screen or the boot logo owns the picture: no
          * menu, no idle exit. */
         if (menu_status_active() || menu_splash_active()) {
-            btn = 0; long_fired = false; menu_idle = 0; continue;
+            btn = 0; scan_btn = 0; long_fired = false; menu_idle = 0; continue;
         }
         if (boot_grace) { --boot_grace; btn = 0; long_fired = false; }
         else if (gpio_get_level(BOOT_BUTTON) == 0) {
@@ -735,10 +744,18 @@ static void control_task(void *arg)
         } else if (btn) {
             if (!long_fired && btn >= 2) {
                 if (s_menu_active) menu_next();
-                else fast_scan();   /* was: next channel */
+                else { rf_next_channel(); after_retune(); }
             }
             btn = 0;
             long_fired = false;
+        }
+        /* SCAN button (D10): a press of 0.1 s or more starts the fast scan on
+         * release; a press during the scan cancels it (fast_scan waits for the
+         * release). Ignored while the menu is open. */
+        if (!boot_grace && scan_pressed()) ++scan_btn;
+        else if (scan_btn) {
+            if (scan_btn >= 2 && !s_menu_active) fast_scan();
+            scan_btn = 0;
         }
         if (s_menu_active) {
             /* The dBm on the CHANNEL page: the gain observer stands still in
@@ -905,12 +922,16 @@ static void control_task(void *arg)
 void control_start(void)
 {
     const gpio_config_t cfg = {
-        .pin_bit_mask = 1ULL << BOOT_BUTTON,
+        .pin_bit_mask = (1ULL << BOOT_BUTTON) |
+                        (experimental_clock_d10() ? 0ULL : 1ULL << SCAN_BUTTON),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&cfg);
+    s_scan_button_enabled = !experimental_clock_d10();
+    printf("[SCAN BUTTON] D10/GPIO10 %s\n", s_scan_button_enabled ? "enabled (to GND, internal pull-up)"
+                                                                     : "disabled: Clock Pin D10 is ON");
     if (!blob_load("last_std", &s_last_std, 1)) s_last_std = 0xFF;
     uint8_t afc_off = 0;
     if (blob_load("afc_off", &afc_off, 1)) s_afc_enabled = !afc_off;

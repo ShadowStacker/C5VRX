@@ -214,29 +214,37 @@ KiCad ERC/DRC and schematic/PCB parity checks are clean; REV C has not been buil
 
 ## Controls
 
-**BOOT button:** short press = **fast scan** (menu: next item); hold 0.6 s =
+**BOOT button:** short press = next channel (menu: next item); hold 0.6 s =
 open the menu (menu: select).
 
-> **Fork modification — fast scan.** In this fork a short BOOT press no
-> longer steps to the next channel. It starts a fast scan that steps through
+> **Fork modification — fast scan on a separate SCAN button.** Wire a
+> normally-open push button from **D10** to **GND** (a 1 kΩ resistor in
+> series is recommended; see below). No pull-up is needed, the firmware
+> enables the internal one. A press starts a fast scan that steps through
 > all 48 channels in table order (R, A, B, E, F, L), starting after the
 > current one, and stops on the first channel with centred analog video.
-> Press BOOT again to scan on from the next channel; a press while it is
-> still scanning cancels and returns to the starting channel. With no VTX on
-> it keeps looping until you press. While it scans, the goggles show a
-> SCANNING screen with the channel being checked. Video on a channel is
-> checked against the channels up to 45 MHz either side (a VTX also shows
-> next door through the filter): the one with the most received power wins.
-> If the channel you scan away from has video, hits that turn out to be
-> that same VTX seen from next door are skipped until the scan comes back
-> around, so every other channel gets its turn; with no other VTX on, it
-> locks back on to the channel you started from.
-> A FOUND screen then names the channel for 2 s before the live picture
-> returns (the live picture itself cannot carry text). Console key `k` does
-> the same. Each full
-> lap logs `FASTSCAN sweep=… ms=… per_channel_us=…` on the serial console.
-> Channels can still be chosen one by one from the menu (CHANNEL / BAND) and
-> the slower "strongest wins" SCAN is still in the menu and on `s`.
+> Press SCAN again to scan on from the next channel; a SCAN or BOOT press
+> while it is still scanning cancels and returns to the starting channel.
+> With no VTX on it keeps looping until you press. While it scans, the
+> goggles show a SCANNING screen with the channel being checked. Video on
+> a channel is checked against the channels up to 45 MHz either side (a
+> VTX also shows next door through the filter): the one with the most
+> received power wins. If the channel you scan away from has video, hits
+> that turn out to be that same VTX seen from next door are skipped until
+> the scan comes back around, so every other channel gets its turn; with
+> no other VTX on, it locks back on to the channel you started from. A
+> FOUND screen then names the channel for 2 s before the live picture
+> returns (the live picture itself cannot carry text). Console key `k`
+> does the same. Each full lap logs `FASTSCAN sweep=… ms=… per_channel_us=…`
+> on the serial console. The slower "strongest wins" SCAN is still in the
+> menu and on `s`.
+>
+> **Why D10:** D0, D1 and D2 carry the receiver's internal IQ signals and
+> must stay unconnected; D3 is a boot strapping pin. D10 is free unless the
+> EXPERIMENTAL **Clock Pin D10** option is ON: then the firmware drives D10
+> with a 40 MHz clock and ignores the SCAN button (the boot log shows
+> `[SCAN BUTTON] … disabled`). The 1 kΩ series resistor protects the pin
+> if the button is pressed while that clock is on.
 >
 > This fast-scan change is a modification of
 > [C5VRX](https://github.com/Twotoz/C5VRX) by Twotoz and the C5VRX
@@ -260,7 +268,7 @@ case-sensitive, without Enter; `h` lists what your firmware supports.
 | Key | Action |
 | --- | --- |
 | `T` / `h` | Status / help |
-| `b` / `c` / `s` / `k` | Next band / next channel / scan / fast scan (fork) |
+| `b` / `c` / `s` / `k` | Next band / next channel / scan / fast scan (fork, same as the SCAN button) |
 | `o` / `n` / `x` / `e` | Open menu / next item / select / exit |
 | `v` / `g` / `G` | Video standard / output level / gain |
 | `F` / `B` / `C` | Calibrate current filter / full RF optimization / read-only calibration report |
